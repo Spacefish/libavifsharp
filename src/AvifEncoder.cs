@@ -1,11 +1,14 @@
 using System.Runtime.InteropServices;
 using LibAvifSharp.NativeTypes;
 using SkiaSharp;
+using System.Threading;
 
 namespace LibAvifSharp;
 
 public static class AvifEncoder
 {
+    static SemaphoreSlim svtAv1Lock = new SemaphoreSlim(1, 1);
+
     public static EncodedImage Encode(SKImage image, Action<EncoderSetttings>? settings = null)
     {
         using var bitmap = SKBitmap.FromImage(image);
@@ -14,6 +17,7 @@ public static class AvifEncoder
 
     public static EncodedImage Encode(SKBitmap bm, Action<EncoderSetttings>? settings = null)
     {
+        bool svtLockAcquired = false;
         var encoderSettings = new EncoderSetttings();
         if(settings != null)
         {
@@ -40,9 +44,18 @@ public static class AvifEncoder
             throw new Exception($"Failed to convert RGB to YUV: {result}");
         }
 
-        var encoderPtr = NativeInterop.avifEncoderCreate();
+        if (encoderSettings.CodecChoice == AvifCodecChoice.AVIF_CODEC_CHOICE_SVT)
+        {
+            svtAv1Lock.Wait();
+            svtLockAcquired = true;
+        }
 
-        var encoder = Marshal.PtrToStructure<NativeTypes.AvifEncoder>(encoderPtr);
+        AvifRWData output = default; // Declare here
+        try
+        {
+            var encoderPtr = NativeInterop.avifEncoderCreate();
+
+            var encoder = Marshal.PtrToStructure<NativeTypes.AvifEncoder>(encoderPtr);
 
         encoder.Quality = encoderSettings.Quality;
         encoder.QualityAlpha = encoderSettings.QualityAlpha;
@@ -57,10 +70,18 @@ public static class AvifEncoder
             throw new Exception($"Failed to add image: {addImageResult}");
         }
 
-        AvifRWData output = new AvifRWData();
+        output = new AvifRWData(); // Initialize here
         NativeInterop.avifEncoderFinish(encoderPtr, ref output);
-        NativeInterop.avifEncoderDestroy(encoderPtr);
-        NativeInterop.avifImageDestroy(image);
+            NativeInterop.avifEncoderDestroy(encoderPtr);
+            NativeInterop.avifImageDestroy(image);
+        }
+        finally
+        {
+            if (svtLockAcquired)
+            {
+                svtAv1Lock.Release();
+            }
+        }
         
         // dont free RGB pixels as they are owned by the bitmap
         // NativeInterop.avifRGBImageFreePixels(ref rgb);
